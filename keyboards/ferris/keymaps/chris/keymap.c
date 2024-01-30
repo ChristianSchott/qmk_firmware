@@ -68,6 +68,8 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 #define RFN_LAYER 6
 #define WASD_LAYER 7
 
+#define QUICK_TAP_TIME 75
+
 const uint8_t LL_HOLD    = 1 << 0; // ctrl
 const uint8_t LL_DOUBLE  = 1 << 1; // fn-left
 const uint8_t RR_HOLD    = 1 << 2; // num
@@ -75,12 +77,15 @@ const uint8_t RR_DOUBLE  = 1 << 3; // fn-right
 const uint8_t LR_HOLD    = 1 << 4; // space / nav
 const uint8_t RL_HOLD    = 1 << 5; // sym
 const uint8_t SPC_FLAG   = 1 << 6;
-const uint8_t COMB_NAV   = LR_HOLD | RL_HOLD;
+const uint8_t SFT_FLAG   = 1 << 7;
+const uint8_t COMB_SHIFT = LR_HOLD | RL_HOLD;
 const uint8_t COMB_MOUSE = LL_HOLD | RR_HOLD;
 
 static uint32_t ll_deadline = 0;
-static uint32_t lr_timer    = 0;
 static uint32_t rr_deadline = 0;
+static uint32_t key_timer   = 0;
+static uint32_t lr_timer    = 0;
+static uint32_t rl_timer    = 0;
 
 static uint8_t state = 0;
 
@@ -116,24 +121,42 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
 
         case TD_LR: {
             if (record->event.pressed) {
-                state |= LR_HOLD | SPC_FLAG;
-                lr_timer = timer;
+                if (timer_elapsed(key_timer) < 120) {
+                    tap_code(KC_SPC);
+                } else {
+                    state |= LR_HOLD;
+                    // only set space flag, if we did not just start holding rl
+                    if (!(is_set(state, RL_HOLD) && timer_elapsed(rl_timer) < QUICK_TAP_TIME)) {
+                        state |= SPC_FLAG;
+                        lr_timer = timer;
+                    }
+                }
             } else {
-                if (is_set(state, SPC_FLAG)) {
+                if (is_set(state, SPC_FLAG) && timer_elapsed(lr_timer) < TAPPING_TERM) {
                     tap_code(KC_SPC);
                 }
                 state &= ~(LR_HOLD | SPC_FLAG);
             }
+            state &= ~SFT_FLAG;
             break;
         }
 
         case TD_RL: {
             if (record->event.pressed) {
                 state |= RL_HOLD;
-                state &= ~SPC_FLAG;
+                // only set space flag, if we did not just start holding lr
+                if (!(is_set(state, LR_HOLD) && timer_elapsed(lr_timer) < QUICK_TAP_TIME)) {
+                    state |= SFT_FLAG;
+                    rl_timer = timer;
+                }
             } else {
-                state &= ~RL_HOLD;
+                if (is_set(state, SFT_FLAG) && timer_elapsed(rl_timer) < TAPPING_TERM) {
+                    // tap_code(KC_SPC);
+                    set_oneshot_mods(MOD_BIT(KC_LSFT));
+                }
+                state &= ~(RL_HOLD | SFT_FLAG);
             }
+            state &= ~SPC_FLAG;
             break;
         }
 
@@ -156,18 +179,27 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
 
         default: {
             if (record->event.pressed) {
-                // if hitting another key right after pressing lr, send space before key instead of shifting
-                if (!is_set(state, RL_HOLD) && is_set(state, SPC_FLAG) && timer_elapsed(lr_timer) < 50) {
-                    tap_code(KC_SPC);
-                    unregister_mods(MOD_LSFT); // ensure the key is not sent shifted
+                if (keycode >= KC_A && keycode <= KC_Z) {
+                    key_timer = timer; // remember when the last key was pressed
                 }
-                state &= ~SPC_FLAG; // unset space flag when hitting other key while
+                state &= ~(SPC_FLAG | SFT_FLAG); // unset space flag when hitting other key while
             }
         }
     }
 
-    layer_state_set(1 | (is_set(state, COMB_MOUSE) ? 1 : 0) << MOUSE_LAYER | (is_set(state, COMB_NAV) ? 1 : 0) << NAV_LAYER | (is_set(state, RR_HOLD) ? 1 : 0) << NUM_LAYER | (is_set(state, RL_HOLD) ? 1 : 0) << SYM_LAYER | (is_set(state, LL_DOUBLE) ? 1 : 0) << LFN_LAYER | (is_set(state, RR_DOUBLE) ? 1 : 0) << RFN_LAYER | (IS_LAYER_ON(WASD_LAYER) ? 1 : 0) << WASD_LAYER // retain WASD layer state
+    // clang-format off
+    bool shift = is_set(state, COMB_SHIFT);
+    layer_state_set(
+        1 
+        | (is_set(state, COMB_MOUSE) ? 1 : 0) << MOUSE_LAYER 
+        | (is_set(state, LR_HOLD) && !shift ? 1 : 0) << NAV_LAYER 
+        | (is_set(state, RL_HOLD) && !shift ? 1 : 0) << SYM_LAYER 
+        | (is_set(state, RR_HOLD) ? 1 : 0) << NUM_LAYER 
+        | (is_set(state, LL_DOUBLE) ? 1 : 0) << LFN_LAYER 
+        | (is_set(state, RR_DOUBLE) ? 1 : 0) << RFN_LAYER 
+        | (IS_LAYER_ON(WASD_LAYER) ? 1 : 0) << WASD_LAYER // retain WASD layer state
     );
+    // clang-format on
 
     if (changed(old_state, state, LL_HOLD) || changed(old_state, state, RR_HOLD)) {
         if (is_set(state, LL_HOLD) && !is_set(state, RR_HOLD)) {
@@ -177,8 +209,8 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
         }
     }
 
-    if (changed(old_state, state, LR_HOLD) || changed(old_state, state, RL_HOLD)) {
-        if (is_set(state, LR_HOLD) && !is_set(state, RL_HOLD)) {
+    if (changed(old_state, state, COMB_SHIFT)) {
+        if (is_set(state, COMB_SHIFT)) {
             register_mods(MOD_LSFT);
         } else {
             unregister_mods(MOD_LSFT);
